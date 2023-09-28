@@ -294,12 +294,12 @@ def interactively_get_section(course, can_choose_none=True):
                 return section
 
 
-def interactively_get_assignment(course):
+def interactively_get_assignment(course, **kw):
     print(f"\nSelect an assignment for {course}.\n")
     print("  Available assignments:")
     print("  --------------------------------------------------------------------")
 
-    assignments = list(course.get_assignments())
+    assignments = list(course.get_assignments(**kw))
     for i, assignment in enumerate(assignments):
         print(f"    {i}: {assignment.name}")
 
@@ -341,8 +341,8 @@ def get_course_by_id_number(course_number, user):
     raise ValueError("Could not find a matching course")
 
 
-def get_assignment_by_id_number(course, num):
-    for assignment in course.get_assignments():
+def get_assignment_by_id_number(course, num, **kw):
+    for assignment in course.get_assignments(**kw):
         if assignment.id == num:
             return assignment
     raise ValueError(f"Could not find assignment matching id={num}")
