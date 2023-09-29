@@ -43,27 +43,23 @@ the "TA Grader" role: https://gitlab.com/plom/plom/-/issues/2338
 import argparse
 import os
 from pathlib import Path
-import random
-import string
-import time
-import itertools
 
-from canvasapi.exceptions import CanvasException
+import string
+
+
+
 from canvasapi import __version__ as __canvasapi_version__
-import pandas
+
 from tqdm import tqdm
 
 from plom import __version__ as __plom_version__
 from plom.canvas import __DEFAULT_CANVAS_API_URL__
 from plom.canvas import (
     canvas_login,
-    download_classlist,
     get_assignment_by_id_number,
-    get_conversion_table,
+    assignment_submitter,
     get_course_by_id_number,
     get_section_by_id_number,
-    get_sis_id_to_canvas_id_table,
-    get_student_list,
     interactively_get_assignment,
     interactively_get_course,
     interactively_get_section,
@@ -71,58 +67,8 @@ from plom.canvas import (
 
 
 # bump this a bit if you change this script
-__script_version__ = "0.2.2"
+__script_version__ = "0.2.3"
 
-
-def sis_id_to_student_dict(student_list):
-    out_dict = {}
-    for student in student_list:
-        assert student.role == "StudentEnrollment"
-        try:
-            assert student.sis_user_id is not None
-        except AssertionError:
-            # print(student.user_id)
-            pass
-            # print(student.)
-        out_dict[student.sis_user_id] = student
-    return out_dict
-
-
-def get_sis_id_to_sub_and_name_table(subs):
-    # Why the heck is canvas so stupid about not associating student
-    # IDs with student submissions
-    conversion = get_conversion_table()
-
-    sis_id_to_sub = {}
-    for sub in subs:
-        canvas_id = sub.user_id
-        try:
-            name, sis_id = conversion[str(canvas_id)]
-            sis_id_to_sub[sis_id] = (sub, name)
-        except KeyError:
-            print(
-                f"couldn't find student information associated with canvas id {canvas_id}..."
-            )
-
-    return sis_id_to_sub
-
-
-def get_sis_id_to_marks():
-    """A dictionary of the Student Number ("sis id") to total mark."""
-    df = pandas.read_csv("marks.csv", dtype="object")
-    return df.set_index("StudentID")["Total"].to_dict()
-    # TODO: if specific types are needed
-    # return {str(k): int(v) for k,v in d.items()}
-
-def get_sis_id_to_LO_marks(headers=['LO1 mark', 'LO2 mark']):
-    """A dictionary of the Student Number ("sis id") to total mark."""
-    df = pandas.read_csv("marks.csv", dtype="object")
-    d1 = df.set_index("StudentID")[headers].to_dict()
-    marks = itertools.zip_longest(*[d1[h].values() for h in headers])
-    ids = list(d1[headers[0]].keys())
-    return {id:mark for id, mark in zip(ids, marks)}
-    # TODO: if specific types are needed
-    # return {str(k): int(v) for k,v in d.items()}
 
 
 parser = argparse.ArgumentParser(
@@ -247,6 +193,7 @@ if __name__ == "__main__":
     print(f"Ok using section: {section}")
 
     use_rubric=True
+
     if use_rubric:
         assignment_kw = {'include':['rubric_assessment']}
     else:
@@ -279,41 +226,7 @@ if __name__ == "__main__":
 
     print("\nFetching data from canvas now...")
     print("  --------------------------------------------------------------------")
-    if section:
-        print("  Getting student list from Section...")
-        student_list = get_student_list(section)
-    else:
-        print("  Getting student list from Course...")
-        student_list = get_student_list(course)
-    print("    done.")
-    print("  Getting canvasapi submission objects...")
-    subs = assignment.get_submissions()
-    print("    done.")
-
-    print("  Getting another classlist and various conversion tables...")
-    download_classlist(course)
-    print("    done.")
-
-    # Most of these conversion tables are fully irrelevant once we
-    # test this code enough to be confident we can remove the
-    # assertions down below
-    print("  Constructing SIS_ID to student conversion table...")
-    sis_id_to_students = sis_id_to_student_dict(student_list)
-    print("    done.")
-
-    print("  Constructing SIS_ID to canvasapi submission conversion table...")
-    sis_id_to_sub_and_name = get_sis_id_to_sub_and_name_table(subs)
-    print("    done.")
-
-    print("  Constructing SIS_ID to canvasapi submission conversion table...")
-    # We only need this second one for double-checking everything is
-    # in order
-    sis_id_to_canvas = get_sis_id_to_canvas_id_table()
-    print("    done.")
-
-    print("  Finally, getting SIS_ID to marks conversion table.")
-    sis_id_to_marks = get_sis_id_to_marks()
-    print("    done.")
+    
 
     if args.dry_run:
         print("\n\nPushing grades and marked papers to Canvas [DRY-RUN]...")
@@ -321,105 +234,24 @@ if __name__ == "__main__":
         print("\n\nPushing grades and marked papers to Canvas...")
     print("  --------------------------------------------------------------------")
 
-    if use_rubric:
-        assignment.edit(assignment={'use_rubric_for_grading':True})
-        LO_ids = [ LO['id']  for LO in assignment.rubric]
-        rating_ids = [{ rating['points']:rating['id']  for rating in LO['ratings'] } for LO in assignment.rubric]
-        rating_descs = [{ rating['points']:rating['description']  for rating in LO['ratings'] } for LO in assignment.rubric]
-        sis_id_to_LO_marks = get_sis_id_to_LO_marks()
+
         
     submit = True
     if submit:
         assignment.edit(assignment={'submission_types':'online_upload'})
 
-    timeouts = []
+    
+    submit = assignment_submitter(assignment, rubric_headers=['LO1 mark', 'LO2 mark'])
 
-    def push_pdf_and_grades(pdf):
-        msgs=[]
+    timeouts = []
+    for pdf in tqdm(Path("reassembled").glob("*.pdf")):
         sis_id = pdf.stem.split("_")[1]
         assert len(sis_id) == 8
         assert set(sis_id) <= set(string.digits)
-
-        try:
-            sub, name = sis_id_to_sub_and_name[sis_id]
-            student = sis_id_to_students[sis_id]
-            total_mark = sis_id_to_marks[sis_id]
-            if use_rubric:
-                LO_marks = sis_id_to_LO_marks[sis_id]
-
-
-        except KeyError:
-            print(f"No student # {sis_id} in Canvas!")
-            print("  Hopefully this is 1-1 w/ a prev canvas id error")
-            print("  SKIPPING this paper and continuing")
-            return
         
-        assert sub.user_id == student.user_id
-        if args.solutions:
-            soln_pdf = soln_dir / f"{pdf.stem.split('_')[0]}_solutions_{sis_id}.pdf"
-            if not soln_pdf.exists():
-                print(f"WARNING: Student #{sis_id} has no solutions: {soln_pdf}")
-                soln_pdf = None
+        not_submitted = submit(sis_id, comments = pdf, dry_run = args.dry_run)
 
-
-        if args.dry_run:
-
-            msgs.append(pdf.name)
-            if args.solutions and soln_pdf:
-                msgs.append(soln_pdf.name)
-            msgs.append(total_mark)
-
-            if use_rubric:
-                for i, (rating_desc, mark) in enumerate(zip(rating_descs, LO_marks)):
-                        msgs.append(f'Outcome Q{i+1}: {rating_desc[float(mark)]}')
-
-        else:
-            ######### UPLOAD PDF ###############
-            # TODO: should look at the return values
-            # TODO: back off on canvasapi.exception.RateLimitExceeded?
-            try:
-                # if submit:
-                #     up = assignment.upload_to_submission(pdf, user=sub.user_id)
-                #     new_sub = sub.edit(submission={'submission_type':'online_upload', 'file_ids':up[1]['id']})
-                # else:
-                sub.upload_comment(pdf)
-            except CanvasException as e:
-                print(e)
-                msgs.append(pdf.name)
-
-            time.sleep(random.uniform(0.25, 0.5))
-
-            ######### UPLOAD SOLUTIONS PDF ###############
-            if args.solutions and soln_pdf:
-                try:
-                    sub.upload_comment(soln_pdf)
-                except CanvasException as e:
-                    print(e)
-                    # timeouts.append((soln_pdf.name, sis_id, name))
-                    msgs.append(soln_pdf.name)
-                time.sleep(random.uniform(0.25, 0.5))
-
-            ######### UPLOAD GRADES ###############
-            try:
-                sub_data = {'submission':{"posted_grade": total_mark},'user':user}
-
-                if use_rubric:
-                    rubric_assessment = {LO_id:{'rating_id': rating_id[float(mark)], 'points': mark} for LO_id, rating_id, mark in zip(LO_ids, rating_ids, LO_marks)}
-                    sub_data['rubric_assessment'] = rubric_assessment
-
-                sub.edit(**sub_data)
-
-            except CanvasException as e:
-                print(e)
-                msgs.append(total_mark)
-
-        for msg in msgs:
-            timeouts.append((msg, sis_id, name))
-
-        time.sleep(random.uniform(0.25, 0.5))
-
-    for pdf in tqdm(Path("reassembled").glob("*.pdf")):
-        push_pdf_and_grades(pdf)
+        timeouts.extend(not_submitted)
 
     if args.dry_run:
         print("Done with DRY-RUN.  The following data would have been uploaded:")

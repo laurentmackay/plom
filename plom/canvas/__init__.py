@@ -18,4 +18,5 @@ from .canvas_utils import (
     interactively_get_assignment,
     interactively_get_course,
     interactively_get_section,
+    assignment_submitter
 )

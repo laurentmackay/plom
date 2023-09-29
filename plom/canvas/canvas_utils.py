@@ -1,15 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2020-2021 Forest Kobayashi
 # Copyright (C) 2021-2023 Colin B. Macdonald
-
+# Copyright (C) 2023 Laurent MacKay
 """Misc utils for interacting with Canvas."""
 
 import csv
 from pathlib import Path
+import random
 import string
+import time
 from warnings import warn
+from collections.abc import Iterable
+
 
 from canvasapi import Canvas
+from canvasapi.exceptions import CanvasException
+import pandas
 
 from plom.canvas import __DEFAULT_CANVAS_API_URL__
 
@@ -382,3 +388,195 @@ def canvas_login(api_url=None, api_key=None):
     this_user = canvas.get_current_user()
     del canvas
     return this_user
+
+
+def get_sis_id_to_sub_and_name_table(subs):
+    # Why the heck is canvas so stupid about not associating student
+    # IDs with student submissions
+    conversion = get_conversion_table()
+
+    sis_id_to_sub = {}
+    for sub in subs:
+        canvas_id = sub.user_id
+        try:
+            name, sis_id = conversion[str(canvas_id)]
+            sis_id_to_sub[sis_id] = (sub, name)
+        except KeyError:
+            print(
+                f"couldn't find student information associated with canvas id {canvas_id}..."
+            )
+
+    return sis_id_to_sub
+
+
+
+def sis_id_to_student_dict(student_list):
+    out_dict = {}
+    for student in student_list:
+        assert student.role == "StudentEnrollment"
+        try:
+            assert student.sis_user_id is not None
+        except AssertionError:
+            # print(student.user_id)
+            pass
+            # print(student.)
+        out_dict[student.sis_user_id] = student
+    return out_dict
+
+
+
+def get_sis_id_to_marks(headers=['Total'], post_process=lambda x: x):
+    """A dictionary of the Student Number ("sis id") to the marks specified by the csv headers in the List/tuple `headers` (default: ['Total']).
+    Marks can be post-processed by an arbitrary function `post_process` (default: no op). """
+
+    df = pandas.read_csv("marks.csv", dtype="object")
+    d = df.set_index("StudentID")[headers].to_dict()
+
+
+    if len(headers)==1:
+        marks = [ post_process(m) for m in d[headers[0]].values()]
+    else:
+        marks = [ [post_process(m) for m in marks] for marks in zip(*[d[h].values() for h in headers])]
+
+    ids = list(d[headers[0]].keys())
+
+    return {id:mark for id, mark in zip(ids, marks)}
+
+
+    # TODO: capacity to specify the csv file(s) - would be nice to have the ability to read from multiple files
+
+def assignment_submitter(assignment, section=None, rubric_headers=False):
+
+    user = canvas_login(assignment._requester.original_url, assignment._requester.access_token )
+
+    course = get_course_by_id_number(assignment.course_id, user)
+
+    if section:
+        print("  Getting student list from Section...")
+        student_list = get_student_list(section)
+    else:
+        print("  Getting student list from Course...")
+        student_list = get_student_list(course)
+
+    print("    done.")
+
+    print("  Getting canvasapi submission objects...")
+    subs = assignment.get_submissions()
+    print("    done.")
+
+    print("  Getting another classlist and various conversion tables...")
+    download_classlist(course)
+    print("    done.")
+
+    # Most of these conversion tables are fully irrelevant once we
+    # test this code enough to be confident we can remove the
+    # assertions down below
+    print("  Constructing SIS_ID to student conversion table...")
+    sis_id_to_students = sis_id_to_student_dict(student_list)
+    print("    done.")
+
+    print("  Constructing SIS_ID to canvasapi submission conversion table...")
+    sis_id_to_sub_and_name = get_sis_id_to_sub_and_name_table(subs)
+    print("    done.")
+
+    print("  Constructing SIS_ID to canvasapi submission conversion table...")
+    # We only need this second one for double-checking everything is
+    # in order
+    sis_id_to_canvas = get_sis_id_to_canvas_id_table()
+    print("    done.")
+
+    print("  Finally, getting SIS_ID to marks conversion table.")
+    sis_id_to_marks = get_sis_id_to_marks()
+    print("    done.")
+
+
+    if rubric_headers:
+        assignment.edit(assignment={'use_rubric_for_grading':True})
+        rubric_ids = [ item['id']  for item in assignment.rubric]
+        rating_ids = [{ rating['points']:rating['id']  for rating in item['ratings'] } for item in assignment.rubric]
+        rating_descs = [{ rating['points']:rating['description']  for rating in item['ratings'] } for item in assignment.rubric]
+        sis_id_to_rubric_marks = get_sis_id_to_marks(headers=rubric_headers)
+
+    def wait():
+        time.sleep(random.uniform(0.25, 0.5))
+
+    def push_to_canvas(sis_id, comments=None, submission_files=None, dry_run=False):
+        ##TODO: move files after upload
+        not_pushed = []
+
+        try:
+            sub, name = sis_id_to_sub_and_name[sis_id]
+            new_sub=sub
+            student = sis_id_to_students[sis_id]
+            total_mark = sis_id_to_marks[sis_id]
+            if rubric_headers:
+                rubric_marks = sis_id_to_rubric_marks[sis_id]
+
+
+        except KeyError:
+            print(f"No student # {sis_id} in Canvas!")
+            print("  Hopefully this is 1-1 w/ a prev canvas id error")
+            print("  SKIPPING this submission and continuing")
+            return 
+
+        assert sub.user_id == student.user_id
+
+        # TODO: should look at the return values
+        # TODO: back off on canvasapi.exception.RateLimitExceeded?
+        if comments:
+            comments = comments if isinstance(comments, Iterable) else [comments]
+            for c in comments:
+                if dry_run:
+                    not_pushed.append(c.name)
+                else:
+                    try:
+                        sub.upload_comment(c)
+                    except CanvasException as e:
+                        print(e)
+                        not_pushed.append(c.name)
+
+                    wait()
+
+        if submission_files:
+            submission_files = submission_files if isinstance(submission_files, Iterable) else [submission_files]
+            ids = []
+            for f in submission_files:
+                if dry_run:
+                    not_pushed.append(f.name)
+                else:
+                    try:
+                        up = assignment.upload_to_submission(f, user=sub.user_id)
+                        ids.append(up[1]['id'])
+                    except CanvasException as e:
+                        print(e)
+                        not_pushed.append(f.name)
+
+                    wait()
+
+            new_sub = sub.edit(submission={'submission_type':'online_upload', 'file_ids':ids})        
+
+        
+        if dry_run:
+            not_pushed.append(total_mark)
+            if rubric_headers:
+                for i, (rating_desc, mark) in enumerate(zip(rating_descs, rubric_marks)):
+                        not_pushed.append(f'rubric item {i+1}: {rating_desc[float(mark)]}')
+        else:
+            sub_data = {'submission':{"posted_grade": total_mark},'user':user}
+
+            if rubric_headers:
+                rubric_assessment = {rubric_id:{'rating_id': rating_id[float(mark)], 'points': mark} for rubric_id, rating_id, mark in zip(rubric_ids, rating_ids, rubric_marks)}
+                sub_data['rubric_assessment'] = rubric_assessment
+            try:
+                new_sub = sub.edit(**sub_data)
+                wait()
+
+            except CanvasException as e:
+                print(e)
+                not_pushed.append(total_mark)
+
+        sis_id_to_sub_and_name[sis_id]=(new_sub, name)
+        
+        return [(m, sis_id, name) for m in not_pushed]
+    
+    return push_to_canvas 
