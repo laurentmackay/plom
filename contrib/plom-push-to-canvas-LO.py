@@ -21,7 +21,7 @@ Overview:
   5. Note that you can provide command line arguments and/or
      set environment variables to avoid the interactive prompts:
      ```
-     ./plom-push-to-canvas.py --help
+     ./plom-push-to-canvas-LO.py --help
      ```
   6. Run it again for real:
      ```
