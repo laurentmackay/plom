@@ -15,7 +15,7 @@ Overview:
   3. Copy this script into the current directory.
   4. Run this script and follow the interactive menus:
      ```
-     ./plom-push-to-canvas.py --dry-run
+     ./plom-push-to-canvas-LO.py --dry-run
      ```
      It will output what would be uploaded.
   5. Note that you can provide command line arguments and/or
@@ -25,7 +25,7 @@ Overview:
      ```
   6. Run it again for real:
      ```
-     ./plom-push-to-canvas.py --course xxxxxx --assignment xxxxxxx --no-section 2>&1 | tee push.log
+     ./plom-push-to-canvas-LO.py --course xxxxxx --assignment xxxxxxx --no-section 2>&1 | tee push.log
      ```
 
 This script traverses the files in `reassembled/` directory
@@ -38,6 +38,26 @@ correspond to an actual reassembled paper will be uploaded.
 
 Instructors and TAs can do this but in the past it would fail for
 the "TA Grader" role: https://gitlab.com/plom/plom/-/issues/2338
+
+############# Special Instructions for ###############
+################# Learning Outcomes ###################
+
+
+# The headers variable (currently defined on line 100) is the main thing to be changed for each assignment/quiz.
+# Each item in the list should correspond to the column header for each  LO rubric.
+# 
+# For example, if marks.csv has marks for  LO1 and LO2, with headers 'LO1 mark' and 'LO2 mark'
+# then the headers variable would be 
+# headers = ['LO1 mark', 'LO2 mark']
+
+
+
+# As a further example, for the final exam I used the following code to generate the headers
+# for all 16 LOs
+# headers = ['LO{i+1} mark' for i in range(16)]
+
+# This is not an elegant solution, but designing a better approach should use input from the PLOM team.
+
 """
 
 import argparse
@@ -75,8 +95,9 @@ from canvasapi.exceptions import CanvasException
 # bump this a bit if you change this script
 __script_version__ = "0.2.4"
 
-headers = ['LO{i+1} mark' for i in range(16)]
 
+
+headers = ['LO1 mark', 'LO2 mark']
 
 parser = argparse.ArgumentParser(
     description=__doc__.split("\n")[0],
