@@ -167,3 +167,4 @@ poetry.lock
 
 # Course testing directories
 plom/canvas/**/
+/contrib/*.zip

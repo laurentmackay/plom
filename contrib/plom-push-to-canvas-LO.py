@@ -43,32 +43,39 @@ the "TA Grader" role: https://gitlab.com/plom/plom/-/issues/2338
 import argparse
 import os
 from pathlib import Path
-
-import string
-
-
+from typing import Iterable
 
 from canvasapi import __version__ as __canvasapi_version__
 
 from tqdm import tqdm
+import random
+import string
+import time
 
 from plom import __version__ as __plom_version__
 from plom.canvas import __DEFAULT_CANVAS_API_URL__
 from plom.canvas import (
     canvas_login,
     get_assignment_by_id_number,
-    assignment_submitter,
     get_course_by_id_number,
     get_section_by_id_number,
     interactively_get_assignment,
     interactively_get_course,
     interactively_get_section,
+    get_sis_id_to_canvas_id_table,
+    get_student_list,
+    download_classlist,
+    sis_id_to_student_dict,
+    get_sis_id_to_marks,
+    get_sis_id_to_sub_and_name_table
 )
 
+from canvasapi.exceptions import CanvasException
 
 # bump this a bit if you change this script
-__script_version__ = "0.2.3"
+__script_version__ = "0.2.4"
 
+headers = ['LO{i+1} mark' for i in range(16)]
 
 
 parser = argparse.ArgumentParser(
@@ -164,6 +171,167 @@ parser.add_argument(
 )
 
 
+def assignment_submitter(assignment, section=None, rubric_headers=None, 
+                         reassembled_dir = 'reassembled', push_subdir = 'pushed_to_canvas', 
+                         move_files_after_submission=True, overwrite=False):
+
+    user = canvas_login(assignment._requester.original_url, assignment._requester.access_token )
+
+    course = get_course_by_id_number(assignment.course_id, user)
+
+    if section:
+        print("  Getting student list from Section...")
+        student_list = get_student_list(section)
+    else:
+        print("  Getting student list from Course...")
+        student_list = get_student_list(course)
+
+    print("    done.")
+
+    print("  Getting canvasapi submission objects...")
+    subs = assignment.get_submissions()
+    print("    done.")
+
+    print("  Getting another classlist and various conversion tables...")
+    download_classlist(course)
+    print("    done.")
+
+    # Most of these conversion tables are fully irrelevant once we
+    # test this code enough to be confident we can remove the
+    # assertions down below
+    print("  Constructing SIS_ID to student conversion table...")
+    sis_id_to_students = sis_id_to_student_dict(student_list)
+    print("    done.")
+
+    print("  Constructing SIS_ID to canvasapi submission conversion table...")
+    sis_id_to_sub_and_name = get_sis_id_to_sub_and_name_table(subs)
+    print("    done.")
+
+    print("  Constructing SIS_ID to canvasapi submission conversion table...")
+    # We only need this second one for double-checking everything is
+    # in order
+    sis_id_to_canvas = get_sis_id_to_canvas_id_table()
+    print("    done.")
+
+    print("  Finally, getting SIS_ID to marks conversion table.")
+    sis_id_to_marks = get_sis_id_to_marks()
+    print("    done.")
+
+
+    if rubric_headers:
+        assignment.edit(assignment={'use_rubric_for_grading':True, 'published':True})
+        rubric_ids = [ item['id']  for item in assignment.rubric]
+        rating_ids = [{ rating['points']:rating['id']  for rating in item['ratings'] } for item in assignment.rubric]
+        rating_descs = [{ rating['points']:rating['description']  for rating in item['ratings'] } for item in assignment.rubric]
+        sis_id_to_rubric_marks = get_sis_id_to_marks(headers=rubric_headers)
+
+    if move_files_after_submission:
+        os.makedirs(os.path.join(reassembled_dir, push_subdir), exist_ok=True)
+
+    def wait():
+        time.sleep(random.uniform(0.25, 0.5))
+
+    def push_to_canvas(sis_id, comments=None, submission_files=None, dry_run=False):
+        ##TODO: move files after upload
+        not_pushed = []
+
+        try:
+            sub, name = sis_id_to_sub_and_name[sis_id]
+            new_sub=sub
+            if not overwrite and not sub.missing:
+                return [(m, sis_id, name) for m in not_pushed]
+            student = sis_id_to_students[sis_id]
+
+        except KeyError:
+            print(f"No student # {sis_id} : {name} in Canvas!")
+            print("  Hopefully this is 1-1 w/ a prev canvas id error")
+            print("  SKIPPING this submission and continuing")
+            return 
+        
+        try:
+            total_mark = sis_id_to_marks[sis_id]
+            if rubric_headers:
+                rubric_marks = sis_id_to_rubric_marks[sis_id]
+
+        except KeyError: 
+            return #no grade, no problem
+
+        assert sub.user_id == student.user_id
+        if move_files_after_submission:
+            files_to_move = set()
+        # TODO: should look at the return values
+        # TODO: back off on canvasapi.exception.RateLimitExceeded?
+        if comments:
+            comments = comments if isinstance(comments, Iterable) else [comments]
+            for c in comments:
+                if dry_run:
+                    not_pushed.append(c.name)
+                else:
+                    try:
+                        sub.upload_comment(c)
+                        if move_files_after_submission: #TODO: think about handling mulitple files properly, more important for the submission file...
+                            files_to_move.add(c)
+                    except CanvasException as e:
+                        print(e)
+                        not_pushed.append(c.name)
+
+                    wait()
+
+        if submission_files:
+            submission_files = submission_files if isinstance(submission_files, Iterable) else [submission_files]
+            # ids = []
+            # for f in submission_files:
+            #     if dry_run:
+            #         not_pushed.append(f.name)
+            #     else:
+            #         try:
+            #             up = assignment.upload_to_submission(f, user=sub.user_id)
+            #             ids.append(up[1]['id'])
+                        # if move_files_after_submission:
+                        #     files_to_move |= c
+            #         except CanvasException as e:
+            #             print(e)
+            #             not_pushed.append(f.name)
+
+            #         wait()
+
+            # new_sub = sub.edit(submission={'submission_type':'online_upload', 'file_ids':ids})        
+
+
+        
+        if dry_run:
+            not_pushed.append(total_mark)
+            if rubric_headers:
+                for i, (rating_desc, mark) in enumerate(zip(rating_descs, rubric_marks)):
+                        not_pushed.append(f'rubric item {i+1}: {rating_desc[float(mark)]}')
+        else:
+            sub_data = {'submission':{"posted_grade": total_mark},'user':user} #i think `user` is redundant here, there was a confounding factor during testing
+
+            if rubric_headers:
+                rubric_assessment = {rubric_id:{'rating_id': rating_id[float(mark)], 'points': mark} for rubric_id, rating_id, mark in zip(rubric_ids, rating_ids, rubric_marks)}
+                sub_data['rubric_assessment'] = rubric_assessment
+            try:
+                new_sub = sub.edit(**sub_data)
+                wait()
+                
+                if move_files_after_submission:
+                    for f in files_to_move:
+                        if f and os.path.exists(f):
+                            os.rename(f, os.path.join(f.parent, push_subdir, f.name) )
+
+            except CanvasException as e:
+                print(e)
+                not_pushed.append(total_mark)
+
+
+
+        sis_id_to_sub_and_name[sis_id]=(new_sub, name)
+        
+        return [(m, sis_id, name) for m in not_pushed]
+    
+    return push_to_canvas 
+
+
 if __name__ == "__main__":
     args = parser.parse_args()
     if hasattr(args, "api_key"):
@@ -241,17 +409,22 @@ if __name__ == "__main__":
         assignment.edit(assignment={'submission_types':'online_upload'})
 
     
-    submit = assignment_submitter(assignment, rubric_headers=['LO1 mark', 'LO2 mark'])
+    submit = assignment_submitter(assignment, rubric_headers=headers)
 
     timeouts = []
+    upload_comment = True
     for pdf in tqdm(Path("reassembled").glob("*.pdf")):
+
         sis_id = pdf.stem.split("_")[1]
+
         assert len(sis_id) == 8
         assert set(sis_id) <= set(string.digits)
-        
-        not_submitted = submit(sis_id, comments = pdf, dry_run = args.dry_run)
 
-        timeouts.extend(not_submitted)
+        comment = pdf if upload_comment else None
+        msg = submit(sis_id, comments = comment, dry_run = args.dry_run)
+
+        if msg:
+            timeouts.extend(msg)
 
     if args.dry_run:
         print("Done with DRY-RUN.  The following data would have been uploaded:")
