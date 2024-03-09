@@ -50,7 +50,7 @@ the "TA Grader" role: https://gitlab.com/plom/plom/-/issues/2338
 # then the headers variable would be 
 # headers = ['LO1 mark', 'LO2 mark']
 
-
+# This list should be in the same order as the quiz rubric items on Canvas, otherwise the marks will get jumbled.
 
 # As a further example, for the final exam I used the following code to generate the headers
 # for all 16 LOs
